@@ -93,7 +93,27 @@ The following classes solve the above problem with different choices of
     L2SolverDecoupled
     TikhonovSolver
     TikhonovSolverDecoupled
+
+
+Block Least Squares
+=======================
+
+Sometimes knowledge of the block structure of the operators can be exploited
+to better utilize the data in the learning problem. This leads to decoupling
+of the problem into several smaller least-squares calculations that are then
+reassembled into a single resulting operator matrix.
+
+The following classes solve the above problem with or without Tikhonov
+regularization.
+
+.. autosummary::
+    :toctree: _autosummaries
+    :nosignatures:
+
+    BlockPlainSolver
+    BlockTikhonovSolver
 """
 
 from ._base import *
 from ._tikhonov import *
+from ._block import *
