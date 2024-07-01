@@ -16,137 +16,237 @@ from ._base import _BaseSolver, lstsq_size
 from ._tikhonov import _BaseTikhonovSolver
 from ..utils import kron2c
 
+class _BaseBlockSolver(_BaseSolver):
+    pass
+
 class BlockPlainSolver(_BaseSolver):
     """Solve the l2-norm ordinary least-squares problem without any
     regularization, i.e.,
 
-        min_{X} ||AX - B||_F^2.
-
     The solution is calculated using scipy.linalg.lstsq().
     """
-    _LSTSQ_LABEL = "||AX - B||"
+    _LSTSQ_LABEL = ""
 
-    def __init__(self, dimensions, structures, form, options=None):
-        """Store keyword arguments for scipy.linalg.lstsq().
-
-        Parameters
-        ----------
-        dimensions : list
-            Contains dimension of state vector for each physics regime
-        structure : list
-            Contains operator structure for each physics regime
-        options : dict
-            Keyword arguments for scipy.linalg.lstsq().
-
-        Returns
-        -------
-        """
-        print('WARNING - using BlockSolver')
+    def __init__(self, dimensions, structures, form, verbose=False, options=None):
+        """Store keyword arguments for scipy.linalg.lstsq(). Store other inputs."""
         self.dimensions = dimensions  # [rf, rs]
         self.structures = structures  # [[False, True, True, False, False, False], [...]]
         self.form = form  # 'cAHB'
         self.options = {} if options is None else options
-
-    def _check_blocks(self):
-        if len(self.dimensions) != len(self.structures):
-            raise ValueError("len(dimensions) != len(structure)")
-    
-    def _check_is_trained(self):
-        if self.dimensions is None:
-            raise ValueError("self.dimensions is None - call fit() to train the lstsq solver")
-        if self.structures is None:
-            raise ValueError("self.structures is None - call fit() to train the lstsq solver")
+        self.verbose = verbose
 
     # Main routines ----------------------------------------------------------
     def fit(self, A, B):
-        """Store (total) A and B."""
+        """Set up least-squares problem. Store (total) A, B."""
 
         # Get dimensions
-        self.rf = self.dimensions[0]
-        self.rs = self.dimensions[1]
-        r = np.array(self.dimensions).sum()
-        self.sf = self.rf*(self.rf+1)//2
-        self.ss = self.rs*(self.rs+1)//2
-        self.s = r*(r+1)//2
+        rf = self.dimensions[0]
+        rs = self.dimensions[1]
+        sf = rf*(rf+1)//2
+        ss = rs*(rs+1)//2
 
         # Construct list of dimensions for data matrix blocks
-        self.dimList = []
+        dimList = []
         if 'c' in self.form:
-            self.dimList.append(1)
+            dimList.append(1)
         if 'A' in self.form:
-            self.dimList.append(self.rf)
-            self.dimList.append(self.rs)
+            dimList.append(rf)
+            dimList.append(rs)
         if 'H' in self.form:
-            self.dimList.append(self.sf)
-            self.dimList.append(self.rf*self.rs)
-            self.dimList.append(self.ss)
-            # A = block_structure(A, self.rf, self.rs, self.form)  # FIXME address restructuring of H blocks
+            dimList.append(sf)
+            dimList.append(rf*rs)
+            dimList.append(ss)
+            # A = block_structure(A, rf, rs, self.form)  # FIXME address restructuring of H blocks
+        self.dimList = dimList
 
         _BaseSolver.fit(self, A, B)
-
-        self._check_blocks()
-
-        if r != self.r:
-            raise ValueError("r != self.r")
 
         return self
 
     def predict(self):
-        """Solve the least-squares problem."""
+        """Solve the least-squares problem. Return X."""
         self._check_is_trained()
 
+        # Initialize main operator matrix (O^T)
         X = np.zeros((self.d, self.r))
 
-        # Solve each decoupled block problem
-        r0i = 0
-        for i, (ri, structure) in enumerate(zip(self.dimensions, self.structures)):
-            print(f"Least squares subproblem i={i:d}:")
+        # Solve each decoupled block problem (one block column of X=O^T)
+        r0j = 0  # counter of which column (physics regime) we are working with
+        for j, (rj, structure) in enumerate(zip(self.dimensions, self.structures)):
+            print_verbose(f"Least squares subproblem j={j:d}:", self.verbose)
 
-            # Construct Ai
-            Ai = []
-            r0j = 0
-            for j, block in enumerate(structure):
-                rj = self.dimList[j]
+            # Construct Aj
+            Aj = []
+            r0i = 0  # counter of which row (operator) we are working with
+            for i, block in enumerate(structure):
+                ri = self.dimList[i]  # dimension of this block
+                
+                # If included, add 1k, Q, kron(Q), ..., to data matrix
                 if block:
-                    Aij = self.A[:, r0j:r0j+rj]
-                    Ai.append(Aij)
-                    print(f'A{i+1:d}{j+1:d}.shape = {Aij.shape}')
-                r0j += rj
-            Ai = np.hstack(Ai)
-            print(f'A{i+1:d}.shape = {Ai.shape}')
-            print(Ai)
+                    Aij = self.A[:, r0i:r0i+ri]
+                    Aj.append(Aij)
+                    print_verbose(f'A{j+1:d}{i+1:d}.shape = {Aij.shape}', self.verbose)
 
-            # Construct Bi
-            Bi = self.B[:, r0i:r0i+ri]
-            print(f'B{i+1:d}.shape = {Bi.shape}')
-            print(Bi)
+                # Increment forward by one operator type
+                r0i += ri
 
-            # Solve least squares problem
-            Xi = la.lstsq(Ai, Bi, **self.options)[0]
-            print(f'X{i+1:d}.shape = {Xi.shape}')
+            # Combine sub-blocks into main blocks
+            Aj = np.hstack(Aj)
 
-            # Insert learned operators back into main O^T operator matrix
-            # X[:Ai.shape[1], r0i:r0i+ri] = Xi
-            r0j_Xi = 0
-            r0j = 0
-            for j, block in enumerate(structure):
-                rj = self.dimList[j]
+            # Construct Bj
+            Bj = self.B[:, r0j:r0j+rj]
+
+            # Solve least squares problem (Compute Xj)
+            Xj = la.lstsq(Aj, Bj, **self.options)[0]
+
+            print_verbose(f'\tA X = B \t{Aj.shape} {Xj.shape} = {Bj.shape}', self.verbose)
+
+            # Insert learned operators back into main operator matrix
+            r0ij = 0  # counter of which row (operator) we are working with (in learned operator submatrix, Xj)
+            r0i = 0  # counter of which row (operator) we are working with (in main operator matrix, X)
+            for i, block in enumerate(structure):
+                ri = self.dimList[i]  # dimension of this block
+
+                # If included, insert c, A, E, H, ..., into main operator matrix
                 if block:
-                    Xij = Xi[r0j_Xi:r0j_Xi+rj, :]
-                    print(f'X{i+1:d}{j+1:d}.shape = {Xij.shape}')
-                    X[r0j:r0j+rj, r0i:r0i+ri] = Xij
-                    r0j_Xi += rj
-                r0j += rj
+                    Xij = Xj[r0ij:r0ij+ri, :]
+                    X[r0i:r0i+ri, r0j:r0j+rj] = Xij
+                    
+                    # Increment forward by one operator type (in learned operator submatrix, Xj)
+                    r0ij += ri
+                    print_verbose(f'X{j+1:d}{i+1:d}.shape = {Xij.shape}', self.verbose)
 
-            # Increment forward main dimension by one physics regime
-            r0i += ri
+                # Increment forward by one operator type (in main operator matrix, X)
+                r0i += ri
 
-        print('X.shape = ')
-        print(X.shape)
+            # Increment forward one physics regime
+            r0j += rj
+
+        print_verbose(f'X.shape = {X.shape}', self.verbose)
+
         return X
 
-class BlockTikhonovSolver(_BaseTikhonovSolver):
-    pass
+class BlockTikhonovSolver(_BaseSolver):
+    """Solve the l2-norm ordinary least-squares problem with regularization,
+    i.e.,
+
+    The solution is calculated using scipy.linalg.lstsq().
+    """
+    _LSTSQ_LABEL = ""
+
+    def __init__(self, dimensions, structures, form, regularizer, verbose=False, options=None):
+        """Store keyword arguments for scipy.linalg.lstsq(). Store other inputs."""
+        self.dimensions = dimensions  # [rf, rs]
+        self.structures = structures  # [[False, True, True, False, False, False], [...]]
+        self.form = form  # 'cAHB'
+        self.regularizer = regularizer
+        self.verbose = verbose
+        self.options = {} if options is None else options
+
+    # Main routines ----------------------------------------------------------
+    def fit(self, A, B):
+        """Set up least-squares problem. Store (total) A, B."""
+
+        # Get dimensions
+        rf = self.dimensions[0]
+        rs = self.dimensions[1]
+        sf = rf*(rf+1)//2
+        ss = rs*(rs+1)//2
+
+        # Construct list of dimensions for data matrix blocks
+        dimList = []
+        if 'c' in self.form:
+            dimList.append(1)
+        if 'A' in self.form:
+            dimList.append(rf)
+            dimList.append(rs)
+        if 'H' in self.form:
+            dimList.append(sf)
+            dimList.append(rf*rs)
+            dimList.append(ss)
+            # A = block_structure(A, rf, rs, self.form)  # FIXME address restructuring of H blocks
+        self.dimList = dimList
+
+        _BaseSolver.fit(self, A, B)
+
+        return self
+
+    def predict(self):
+        """Solve the least-squares problem. Return X."""
+        self._check_is_trained()
+
+        # Initialize main operator matrix (O^T)
+        X = np.zeros((self.d, self.r))
+
+        # Solve each decoupled block problem (one block column of X=O^T)
+        r0j = 0  # counter of which column (physics regime) we are working with
+        for j, (rj, structure) in enumerate(zip(self.dimensions, self.structures)):
+            print_verbose(f"Least squares subproblem j={j:d}:", self.verbose)
+
+            # Construct Aj, Pj
+            Aj, Pj = [], []
+            r0i = 0  # counter of which row (operator) we are working with
+            for i, block in enumerate(structure):
+                ri = self.dimList[i]  # dimension of this block
+                
+                # If included, add 1k, Q, kron(Q), ..., to data matrix
+                if block:
+                    Aij = self.A[:, r0i:r0i+ri]
+                    Aj.append(Aij)
+                    print_verbose(f'\tA{i:d}.shape = {Aij.shape}', self.verbose)
+
+                    Pij = self.regularizer[r0i:r0i+ri, r0i:r0i+ri]
+                    Pj.append(Pij)
+                    print_verbose(f'\tP{i:d}.shape = {Pij.shape}', self.verbose)
+
+                # Increment forward by one operator type
+                r0i += ri
+
+            # Combine sub-blocks into main blocks
+            Aj = np.hstack(Aj)
+            Pj = la.block_diag(*Pj)
+
+            # Construct Bj
+            Bj = self.B[:, r0j:r0j+rj]
+
+            # Prepare for SVD solve
+            Atilde = np.vstack((Aj, Pj))
+            Btilde = np.vstack((Bj, np.zeros((Pj.shape[0], Bj.shape[1]))))
+
+            # Solve least squares problem (Compute Xj)
+            Xj = la.lstsq(Atilde, Btilde, **self.options)[0]
+
+            print_verbose(f'\tA X = B \t{Aj.shape} {Xj.shape} = {Bj.shape}', self.verbose)
+            print_verbose(f'\tP \t\t{Pj.shape}', self.verbose)
+
+            # Insert learned operators back into main operator matrix
+            r0ij = 0  # counter of which row (operator) we are working with (in learned operator submatrix, Xj)
+            r0i = 0  # counter of which row (operator) we are working with (in main operator matrix, X)
+            for i, block in enumerate(structure):
+                ri = self.dimList[i]  # dimension of this block
+
+                # If included, insert c, A, E, H, ..., into main operator matrix
+                if block:
+                    Xij = Xj[r0ij:r0ij+ri, :]
+                    X[r0i:r0i+ri, r0j:r0j+rj] = Xij
+                    
+                    # Increment forward by one operator type (in learned operator submatrix, Xj)
+                    r0ij += ri
+                    print_verbose(f'X{j+1:d}{i+1:d}.shape = {Xij.shape}', self.verbose)
+
+                # Increment forward by one operator type (in main operator matrix, X)
+                r0i += ri
+
+            # Increment forward one physics regime
+            r0j += rj
+
+        print_verbose(f'X.shape = {X.shape}', self.verbose)
+
+        return X
+
+def print_verbose(string, status):
+    if status:
+        print(string)
 
 def block_structure(A, rf, rs, form):
 
