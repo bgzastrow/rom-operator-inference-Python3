@@ -19,7 +19,7 @@ def mpl_config():
     plt.rc("figure", dpi=300, figsize=(9, 3))
     plt.rc("font", family="serif")
     plt.rc("legend", edgecolor="none", frameon=False)
-    plt.rc("text", usetex=True)
+    # plt.rc("text", usetex=True)
 
     # Turn off stdout flushing to keep notebook outputs together.
     TimedBlock.rebuffer = True
